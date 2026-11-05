@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>森夜守護者｜草鴞生存原型</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#101a20; color:#edf3df; font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif; }
+  #wrap { max-width:1000px; margin:0 auto; padding:14px; }
+  header { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
+  h1 { font-size:clamp(20px,4vw,30px); margin:0; letter-spacing:.08em; }
+  .sub { color:#b8c8b4; font-size:13px; margin-top:4px; }
+  canvas { display:block; width:100%; height:auto; border:3px solid #62765d; border-radius:8px; background:#182b28; image-rendering:pixelated; }
+  .help { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0; }
+  .pill { background:#24352f; border:1px solid #536b55; border-radius:999px; padding:6px 10px; font-size:13px; }
+  button { cursor:pointer; background:#d3e2a3; color:#17251e; font-weight:800; border:0; border-radius:8px; padding:10px 16px; font-size:15px; }
+  button:hover { filter:brightness(1.08); }
+  #note { color:#c4d0bd; font-size:13px; line-height:1.6; }
+  .mobile { display:none; gap:8px; margin-top:10px; flex-wrap:wrap; }
+  .mobile button { min-width:58px; touch-action:none; }
+  @media (pointer:coarse) { .mobile { display:flex; } }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <header>
+    <div>
+      <h1>森夜守護者：草鴞</h1>
+      <div class="sub">2.5D 俯視像素風・可操作戰鬥原型 v0.4</div>
+    </div>
+    <button id="restartTop" hidden>重新開始</button>
+  </header>
+  <canvas id="game" width="800" height="500" aria-label="草鴞生存遊戲畫面"></canvas>
+  <div class="help">
+    <span class="pill">移動：WASD／方向鍵</span>
+    <span class="pill">普通攻擊：J／Space</span>
+    <span class="pill">閃避：Shift／K</span>
+    <span class="pill">目標：捕食無毒老鼠、避開毒鼠、撐到早上</span>
+  </div>
+  <div class="mobile" aria-label="手機操作">
+    <button data-key="ArrowUp">↑</button><button data-key="ArrowLeft">←</button>
+    <button data-key="ArrowDown">↓</button><button data-key="ArrowRight">→</button>
+    <button data-key="j">攻擊</button><button data-key="k">閃避</button>
+  </div>
+  <p id="note">原型說明：草鴞移動會消耗飢餓值。飢餓值歸零時會開始扣除生命值（HP），生命值歸零則遊戲失敗。閃避消耗體力，停止閃避 3 秒後體力會回復並加速消耗飢餓值。捕食灰鼠可恢復飢餓值與少量生命值。</p>
+</div>
+<script>
+(() => {
+const canvas = document.getElementById('game'), ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+const W=canvas.width,H=canvas.height, WORLD_W=1600, WORLD_H=1100;
+const keys = new Set();
+let mode='title', player, poison=[], mice=[], particles=[], holes=[], farmer;
+let elapsed=0, last=0, mouseSpawnTimer=0, message='', messageTime=0, camera={x:0,y:0}, farmers=[];
+let gameOverTime = 0;
+const duration=90;
+const rand=(a,b)=>a+Math.random()*(b-a);
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+
+function reset(){
+  // 新增 hp (生命值)
+  player={x:WORLD_W*.5, y:WORLD_H*.55, hp:100, hunger:100, stamina:100, staminaWait:0, dirX:0, dirY:-1, facing:1, attack:0, dodge:0, invuln:0, step:0};
+  poison=[]; mice=[]; particles=[]; elapsed=0; mouseSpawnTimer=1.5; message='找到洞口附近的無毒老鼠，並留意農夫！'; messageTime=4;
+  holes=[];
+  farmer={x:WORLD_W*.52,y:WORLD_H*.18,state:'laugh',timer:2.0};
+  farmers=[
+    {x:WORLD_W*.18,y:WORLD_H*.16,state:'laugh',timer:rand(1,4)},
+    {x:WORLD_W*.82,y:WORLD_H*.18,state:'laugh',timer:rand(2,5)},
+    {x:WORLD_W*.16,y:WORLD_H*.82,state:'laugh',timer:rand(3,6)},
+    {x:WORLD_W*.84,y:WORLD_H*.80,state:'laugh',timer:rand(1,5)}
+  ];
+  camera={x:clamp(player.x-W/2,0,WORLD_W-W),y:clamp(player.y-H/2,0,WORLD_H-H)};
+  for(let i=0;i<4;i++) spawnMouse();
+}
+
+function start(){
+  keys.clear();
+  reset();
+  mode='play';
+  document.getElementById('restartTop').hidden=false;
+}
+
+function say(t){message=t;messageTime=2.6;}
+
+function spawnMouse(){
+  const h={x:rand(55,WORLD_W-55),y:rand(90,WORLD_H-55)};
+  holes.push({...h,life:.45});
+  if(holes.length>7) holes.shift();
+  mice.push({x:h.x+rand(-7,7),y:h.y+rand(-7,7),life:rand(18,30),phase:rand(0,6),vx:rand(-70,70),vy:rand(-65,65),attackCd:rand(.5,1.5)});
+}
+
+function radialPoisonFrom(source){
+  const count=6;
+  for(let i=0;i<count;i++){
+    const a=(Math.PI*2*i/count)+rand(-.18,.18);
+    poison.push({
+      x:source.x,y:source.y,
+      vx:Math.cos(a)*rand(20,48),vy:Math.sin(a)*rand(20,48),
+      life:15,r:7,attackCd:0,
+      speed:rand(42,66),turn:rand(.7,1.7),phase:rand(0,Math.PI*2)
+    });
+  }
+}
+
+function update(dt){
+  if(mode!=='play') return;
+  elapsed+=dt;
+  player.step+=dt*10;
+
+  const updateFarmer = (f, primary=false) => {
+    f.timer-=dt;
+    if(f.state==='laugh' && f.timer<=0){f.state='hide';f.timer=1.1;if(primary)say('農夫發出笑聲，躲進草叢……');}
+    else if(f.state==='hide' && f.timer<=0){f.state='throw';f.timer=.35;radialPoisonFrom(f);if(primary)say('農夫投毒！毒鼠散開後各自追蹤草鴞。');}
+    else if(f.state==='throw' && f.timer<=0){f.state='laugh';f.timer=rand(7,11);}
+  };
+  updateFarmer(farmer,true);
+  for(const f of farmers) updateFarmer(f,false);
+  
+  mouseSpawnTimer-=dt;
+  if(mouseSpawnTimer<=0 && mice.length<8){mouseSpawnTimer=rand(3.8,6.2);spawnMouse();}
+  
+  // 處理移動方向邏輯
+  let dx=0, dy=0;
+  if (player.dodge > 0) {
+    dx = player.dirX;
+    dy = player.dirY;
+  } else {
+    if(keys.has('a')||keys.has('ArrowLeft')) dx--;
+    if(keys.has('d')||keys.has('ArrowRight')) dx++;
+    if(keys.has('w')||keys.has('ArrowUp')) dy--;
+    if(keys.has('s')||keys.has('ArrowDown')) dy++;
+    
+    if(dx!==0 || dy!==0){
+      const len = Math.hypot(dx,dy); 
+      dx/=len; dy/=len;
+      player.dirX = dx; player.dirY = dy;
+      if(Math.abs(dx)>.05) player.facing = dx<0?-1:1;
+    }
+  }
+
+  if(dx!==0 || dy!==0){
+    const speed = player.dodge > 0 ? 450 : 150;
+    player.x += dx * speed * dt;
+    player.y += dy * speed * dt;
+    if(player.dodge <= 0) player.hunger -= dt * 1.5;
+  }
+
+  // 體力回復邏輯
+  if(player.staminaWait > 0) {
+    player.staminaWait -= dt;
+  } else if (player.stamina < 100) {
+    player.stamina = Math.min(100, player.stamina + dt * 25);
+    player.hunger -= dt * 3.5;
+  }
+
+  // 飢餓值歸零扣血機制：每秒扣 15 點 HP
+  if (player.hunger <= 0) {
+    player.hp -= dt * 15;
+    if (Math.random() < dt * 2) {
+      say('飢餓過度！生命值正在減少！');
+    }
+  }
+
+  if(player.dodge>0){
+    player.dodge-=dt;
+    player.invuln=Math.max(player.invuln, player.dodge);
+  }
+  
+  player.invuln=Math.max(0,player.invuln-dt);
+  player.attack=Math.max(0,player.attack-dt);
+  
+  player.x=clamp(player.x,35,WORLD_W-35);player.y=clamp(player.y,65,WORLD_H-30);
+  camera.x=clamp(player.x-W/2,0,WORLD_W-W);camera.y=clamp(player.y-H/2,0,WORLD_H-H);
+  player.hunger=clamp(player.hunger,0,100);
+  player.hp=clamp(player.hp,0,100);
+
+  // 毒鼠邏輯 (扣除 HP)
+  for(const p of poison){
+    p.life-=dt; p.phase+=dt;
+    const pdx=player.x-p.x, pdy=player.y-p.y, len=Math.hypot(pdx,pdy)||1;
+    const speed=p.speed||54;
+    const targetVx=pdx/len*speed+Math.cos(p.phase*1.7)*12;
+    const targetVy=pdy/len*speed+Math.sin(p.phase*1.3)*12;
+    const turn=p.turn||1;
+    p.vx+=(targetVx-p.vx)*Math.min(1,dt*turn);
+    p.vy+=(targetVy-p.vy)*Math.min(1,dt*turn);
+    p.x+=p.vx*dt;p.y+=p.vy*dt;
+    if(p.life>0 && Math.hypot(p.x-player.x,p.y-player.y)<19 && player.invuln<=0){
+      player.hp=Math.max(0,player.hp-20); // 毒鼠造成 20 點生命傷害
+      player.invuln=.9;p.attackCd=.8;
+      say('遭毒鼠攻擊！失去大量生命值！');
+    }
+  }
+  poison=poison.filter(p=>p.life>0);
+  
+  for(const h of holes) h.life-=dt;
+  holes=holes.filter(h=>h.life>0);
+  
+  // 灰鼠撞擊邏輯 (扣除少量 HP)
+  for(const m of mice){
+    m.life-=dt;m.phase+=dt*3;m.attackCd-=dt;
+    if(Math.random()<dt*1.8){m.vx=rand(-100,100);m.vy=rand(-90,90);}
+    const mdx=player.x-m.x, mdy=player.y-m.y, d=Math.hypot(mdx,mdy)||1;
+    if(d<105){m.vx+=(mdx/d*48-m.vx)*dt*1.3;m.vy+=(mdy/d*48-m.vy)*dt*1.3;}
+    m.x+=m.vx*dt;m.y+=m.vy*dt;
+    m.x=clamp(m.x,25,WORLD_W-25);m.y=clamp(m.y,65,WORLD_H-25);
+    if(d<22&&m.attackCd<=0&&player.invuln<=0){
+      player.hp=Math.max(0,player.hp-5); // 撞擊扣 5 點 HP
+      player.invuln=.28;m.attackCd=1.2;
+      const pushX=(player.x-m.x)/(d||1), pushY=(player.y-m.y)/(d||1);
+      player.x=clamp(player.x+pushX*7,35,WORLD_W-35);
+      player.y=clamp(player.y+pushY*7,65,WORLD_H-30);
+      say('灰鼠撞了過來！按 J 攻擊捕食，或閃避拉開距離。');
+    }
+  }
+  mice=mice.filter(m=>m.life>0);
+  particles=particles.filter(p=>(p.life-=dt)>0);
+
+  // 死亡判定：改為生命值 HP 歸零
+  if(player.hp<=0){
+    mode='lose';
+    gameOverTime = performance.now();
+    say('生命值耗盡，草鴞無法繼續行動。');
+  }
+  if(elapsed>=duration){
+    mode='win';
+    gameOverTime = performance.now();
+    say('天亮了！草鴞成功撐過這個夜晚。');
+  }
+  if(messageTime>0)messageTime-=dt;
+}
+
+function attack(){
+  if(mode!=='play')return;
+  player.attack=.22;
+  const candidates=mice.map((m,i)=>({m,i,d:Math.hypot(m.x-player.x,m.y-player.y)})).filter(o=>o.d<48 && (o.m.x-player.x)*player.facing>-20).sort((a,b)=>a.d-b.d);
+  if(candidates.length){
+    const target=candidates[0].m;mice=mice.filter(m=>m!==target);
+    player.hunger=clamp(player.hunger+25,0,100);
+    player.hp=clamp(player.hp+10,0,100); // 捕食同時恢復 10 點 HP
+    for(let i=0;i<8;i++)particles.push({x:target.x,y:target.y,vx:rand(-35,35),vy:rand(-35,35),life:.5});
+    say('捕食成功！飢餓值與生命值恢復。');
+  } else {
+    say('揮擊！靠近洞口附近的無毒老鼠才能捕食。');
+  }
+}
+
+function dodge(){
+  if(mode!=='play'||player.dodge>0)return;
+  if(player.stamina < 25) {
+    say('體力不足，無法閃避！');
+    return;
+  }
+
+  let dx=0,dy=0;
+  if(keys.has('a')||keys.has('ArrowLeft'))dx--;
+  if(keys.has('d')||keys.has('ArrowRight'))dx++;
+  if(keys.has('w')||keys.has('ArrowUp'))dy--;
+  if(keys.has('s')||keys.has('ArrowDown'))dy++;
+  if(dx===0&&dy===0){dx=player.dirX;dy=player.dirY;}
+  const len=Math.hypot(dx,dy)||1;
+  player.dirX=dx/len; player.dirY=dy/len;
+  if(Math.abs(dx)>.05) player.facing=dx<0?-1:1;
+  
+  player.stamina -= 25;
+  player.staminaWait = 3.0;
+  player.dodge = 0.3; 
+  player.invuln = 0.4;
+  
+  for(let i=0;i<6;i++) particles.push({x:player.x, y:player.y, vx:rand(-60,60), vy:rand(-60,60), life:0.3, c:'#ffffff'});
+}
+
+function rect(x,y,w,h,c){ctx.fillStyle=c;ctx.fillRect(Math.round(x),Math.round(y),w,h);}
+function text(t,x,y,size=16,color='#f0f4dd',align='left'){ctx.fillStyle=color;ctx.font=`bold ${size}px monospace`;ctx.textAlign=align;ctx.fillText(t,x,y);}
+
+function drawGround(){
+  rect(0,0,WORLD_W,WORLD_H,'#1c342c');
+  for(let y=50;y<WORLD_H;y+=32)for(let x=0;x<WORLD_W;x+=32){
+    rect(x+(y%64?0:8),y,24,2,'#254133');
+    if((x+y)%5===0)rect(x+8,y+12,3,3,'#304b36');
+  }
+  for(let i=0;i<46;i++){
+    const x=(i*173+37)%WORLD_W,y=55+(i*97)%(WORLD_H-80);
+    rect(x,y,3,10,'#466441');rect(x+4,y+3,3,7,'#6b8047');rect(x-3,y+6,3,5,'#3d5b3a');
+  }
+  for(const h of holes){
+    rect(h.x-13,h.y-5,26,12,'#111a17');rect(h.x-10,h.y-3,20,8,'#080e0c');
+    rect(h.x-15,h.y+6,30,3,'#796444');
+  }
+}
+
+function drawFarmer(){
+  if(!farmer) return;
+  const f=farmer;
+  if(f.state==='hide'){
+    rect(f.x-19,f.y-8,38,21,'#4e6d39');rect(f.x-13,f.y-16,26,13,'#698a46');
+    text('草叢',f.x,f.y+30,10,'#b4c58b','center');return;
+  }
+  rect(f.x-10,f.y-8,20,24,'#6d4530');rect(f.x-15,f.y-21,30,17,'#b58a5a');
+  rect(f.x-18,f.y-24,36,7,'#34382d');rect(f.x-8,f.y-15,4,3,'#241e18');rect(f.x+5,f.y-15,4,3,'#241e18');
+  if(f.state==='laugh'){text('HA!',f.x,f.y-32,13,'#f2d28b','center');}
+  else if(f.state==='throw'){text('投毒',f.x,f.y-32,12,'#d4e59a','center');}
+}
+
+function drawOwl(){
+  const p=player;ctx.save();ctx.translate(Math.round(p.x),Math.round(p.y));ctx.scale(p.facing,1);const x=0,y=0;
+  
+  if (mode === 'lose') ctx.globalAlpha = 0.4;
+  else if (p.invuln>0 && Math.floor(elapsed*18)%2===0) { ctx.restore(); return; }
+  
+  rect(x-13,y+11,26,6,'#101b18');
+  rect(x-10,y-18,20,28,'#d8cba5');rect(x-16,y-12,7,20,'#8c7658');rect(x+9,y-12,7,20,'#8c7658');
+  rect(x-8,y-25,6,10,'#d8cba5');rect(x+3,y-25,6,10,'#d8cba5');
+  rect(x-8,y-13,7,7,'#f0e6c8');rect(x+2,y-13,7,7,'#f0e6c8');
+  rect(x-6,y-11,3,3,'#171c17');rect(x+4,y-11,3,3,'#171c17');
+  rect(x-2,y-6,4,4,'#c88c3f');
+  rect(x-5,y+1,10,5,'#bba87c');
+  if(Math.floor(p.step)%2===0&&keys.size){rect(x-9,y+8,5,5,'#d9c9a0');rect(x+5,y+8,5,5,'#d9c9a0');}
+  if(p.attack>0){
+    ctx.strokeStyle='#f5e8b5';ctx.lineWidth=3;ctx.beginPath();
+    ctx.arc(x+14,y,25,-.9,1.1);ctx.stroke();
+  }
+  
+  if (mode === 'lose') {
+    ctx.globalAlpha = 1.0;
+    text('💀', x, y-30, 24, '#ffffff', 'center');
+    text('死亡', x, y-10, 12, '#ff6666', 'center');
+  } else {
+    text('草鴞',x,y+34,11,'#f2edcf','center');
+  }
+  ctx.restore();
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  ctx.save();ctx.translate(-camera.x,-camera.y);
+  drawGround();
+  ctx.fillStyle='#d5dfb0';ctx.beginPath();ctx.arc(735,76,19,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#1c342c';ctx.beginPath();ctx.arc(743,69,17,0,Math.PI*2);ctx.fill();
+  for(const m of mice){
+    const x=Math.round(m.x),y=Math.round(m.y);
+    rect(x-7,y-4,14,9,'#9b9c89');rect(x-4,y-8,5,5,'#b8b6a2');rect(x+2,y-7,4,4,'#b8b6a2');
+    rect(x+5,y-2,3,2,'#e7b2a2');rect(x-11,y+1,5,2,'#777c6d');
+  }
+  for(const p of poison){
+    ctx.fillStyle='#b5e34b';ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);ctx.fill();
+    rect(p.x-2,p.y-2,4,4,'#34451e');
+    text('☠',p.x,p.y-9,10,'#d9f38b','center');
+  }
+  for(const p of particles){rect(p.x,p.y,3,3, p.c || '#f0e6a1');}
+  drawFarmer();for(const f of farmers){const saved=farmer;farmer=f;drawFarmer();farmer=saved;}
+  if(player)drawOwl();
+  ctx.restore();
+  
+  // UI 介面：生命值(HP)、飢餓值(HUNGER)、體力值(STAMINA)
+  rect(14,10,245,86,'#101c18');
+  
+  // 生命值條 (紅色 HP)
+  rect(20,18,130,8,'#4a2323');
+  rect(20,18,130*(player?player.hp:100)/100,8,'#e74c3c');
+  text('生命 '+(player?Math.ceil(player.hp):100)+'%', 158, 26, 12, '#ff9999');
+
+  // 飢餓值條 (黃綠色 HUNGER)
+  rect(20,34,130,8,'#42513b');
+  rect(20,34,130*(player?player.hunger:100)/100,8,'#c8dc78');
+  text('飢餓 '+(player?Math.ceil(player.hunger):100)+'%', 158, 42, 12, '#edf3df');
+  
+  // 體力條 (藍色 STAMINA)
+  rect(20,50,130,8,'#293845');
+  rect(20,50,130*(player?player.stamina:100)/100,8,'#6cb5d9');
+  text('體力 '+(player?Math.ceil(player.stamina):100)+'%', 158, 58, 12, '#edf3df');
+
+  // 時間進度條
+  rect(20,68,130,5,'#35423a');rect(20,68,130*Math.min(1,elapsed/duration),5,'#87b7c4');
+  text('夜晚 '+Math.floor(Math.min(elapsed,duration))+' / '+duration+' 秒', 158, 75, 11, '#cbd7c0');
+  
+  text('毒鼠：分散追蹤／15 秒後消失  ·  灰鼠：亂竄',W-15,25,12,'#edf3df','right');
+  
+  if(messageTime>0&&message){
+    rect(100,H-47,600,31,'#101c18');text(message,W/2,H-27,13,'#f1edcc','center');
+  }
+  
+  if(mode==='title'||mode==='win'||mode==='lose'){
+    rect(0,0,W,H,'rgba(5,12,10,.72)');
+    rect(150,105,500,290,'#1e342b');rect(156,111,488,278,'#526b4b');
+    rect(162,117,476,266,'#1b3027');
+    if(mode==='title'){
+      text('森夜守護者',W/2,176,31,'#e0e9b9','center');
+      text('OWL OF THE NIGHT',W/2,205,13,'#9fb79a','center');
+      text('在天亮前存活，避開毒鼠並捕食灰鼠',W/2,248,15,'#edf3df','center');
+      text('飢餓值歸零會持續扣生命值！',W/2,276,13,'#ff9999','center');
+      rect(300,310,200,42,'#d3e2a3');text('按 ENTER 開始',W/2,337,17,'#17251e','center');
+    }else if(mode==='win'){
+      text('天亮了！',W/2,190,32,'#e0e9b9','center');
+      text('草鴞成功撐過這個夜晚。',W/2,235,16,'#edf3df','center');
+      text('按 ENTER 再玩一次',W/2,305,16,'#d3e2a3','center');
+    }else{
+      text('💀 草鴞已死亡 💀',W/2,185,28,'#ff6b6b','center');
+      text('生命值歸零，這次生存挑戰失敗。',W/2,235,15,'#edf3df','center');
+      text('按 ENTER 或點擊重新開始按鈕再試一次',W/2,305,16,'#d3e2a3','center');
+    }
+  }
+}
+
+function loop(t){
+  try {
+    const dt=Math.min((t-last)/1000||0,.04);last=t;
+    update(dt);draw();
+    requestAnimationFrame(loop);
+  } catch(err) {
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle='#182b28';ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#f3e9c8';ctx.textAlign='center';
+    ctx.font='bold 22px monospace';ctx.fillText('遊戲執行時發生錯誤',W/2,190);
+    ctx.font='14px monospace';ctx.fillText(String(err && err.message || err).slice(0,90),W/2,225);
+    ctx.fillText('請截圖這個訊息回傳',W/2,260);
+    console.error(err);
+  }
+}
+
+ctx.fillStyle='#1c342c';ctx.fillRect(0,0,W,H);
+ctx.fillStyle='#e0e9b9';ctx.textAlign='center';
+ctx.font='bold 20px monospace';ctx.fillText('正在載入森夜守護者……',W/2,H/2);
+
+window.addEventListener('keydown',e=>{
+  const k=e.key.length===1?e.key.toLowerCase():e.key;
+  if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key))e.preventDefault();
+  keys.add(k);
+  
+  if((mode==='title'||mode==='win'||mode==='lose')&&(e.key==='Enter'||e.key===' ')){
+    if(mode!=='title' && performance.now() - gameOverTime < 1500) return;
+    start();
+    return;
+  }
+  if(mode==='play'&&(k==='j'||e.key===' '))attack();
+  if(mode==='play'&&(k==='k'||k==='Shift'||k==='shift'))dodge();
+});
+
+window.addEventListener('keyup',e=>{keys.delete(e.key.length===1?e.key.toLowerCase():e.key);});
+
+document.querySelectorAll('[data-key]').forEach(b=>{
+  const k=b.dataset.key;
+  const down=e=>{e.preventDefault();const kk=k.length===1?k.toLowerCase():k;keys.add(kk);};
+  const up=e=>{e.preventDefault();const kk=k.length===1?k.toLowerCase():k;keys.delete(kk);};
+  b.addEventListener('pointerdown',down);b.addEventListener('pointerup',up);b.addEventListener('pointerleave',up);b.addEventListener('pointercancel',up);
+  b.addEventListener('click',()=>{
+    if(k==='j')attack();
+    if(k==='k')dodge();
+    if(mode==='title'||mode==='lose'||mode==='win') {
+      if(mode!=='title' && performance.now() - gameOverTime < 1500) return;
+      start();
+    }
+  });
+});
+
+document.getElementById('restartTop').addEventListener('click',()=>{
+  if(mode==='lose' || mode==='win') {
+    if(performance.now() - gameOverTime < 1500) return;
+  }
+  start();
+});
+
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
