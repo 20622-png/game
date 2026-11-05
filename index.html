@@ -59,9 +59,16 @@ const duration=90;
 const rand=(a,b)=>a+Math.random()*(b-a);
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 
+const owlImages = [];
+for (let i = 1; i <= 8; i++) {
+  const img = new Image();
+  img.src = `走路${i}.png`;
+  owlImages.push(img);
+}
+
 function reset(){
-  // 新增 hp (生命值)
-  player={x:WORLD_W*.5, y:WORLD_H*.55, hp:100, hunger:100, stamina:100, staminaWait:0, dirX:0, dirY:-1, facing:1, attack:0, dodge:0, invuln:0, step:0};
+  // 預設面向左方 (dirX: -1, dirY: 0) 確保開局方向正確
+  player={x:WORLD_W*.5, y:WORLD_H*.55, hp:100, hunger:100, stamina:100, staminaWait:0, dirX:-1, dirY:0, facing:-1, attack:0, dodge:0, invuln:0, step:0, isMoving:false};
   poison=[]; mice=[]; particles=[]; elapsed=0; mouseSpawnTimer=1.5; message='找到洞口附近的無毒老鼠，並留意農夫！'; messageTime=4;
   holes=[];
   farmer={x:WORLD_W*.52,y:WORLD_H*.18,state:'laugh',timer:2.0};
@@ -107,7 +114,6 @@ function radialPoisonFrom(source){
 function update(dt){
   if(mode!=='play') return;
   elapsed+=dt;
-  player.step+=dt*10;
 
   const updateFarmer = (f, primary=false) => {
     f.timer-=dt;
@@ -140,6 +146,15 @@ function update(dt){
     }
   }
 
+  player.isMoving = (dx !== 0 || dy !== 0 || player.dodge > 0);
+
+  // 3. 調整圖片動畫切換速度 (改為 dt*8)
+  if (player.isMoving) {
+    player.step += dt * 8;
+  } else {
+    player.step = 0; // 靜止時重置回第 1 張
+  }
+
   if(dx!==0 || dy!==0){
     const speed = player.dodge > 0 ? 450 : 150;
     player.x += dx * speed * dt;
@@ -147,7 +162,6 @@ function update(dt){
     if(player.dodge <= 0) player.hunger -= dt * 1.5;
   }
 
-  // 體力回復邏輯
   if(player.staminaWait > 0) {
     player.staminaWait -= dt;
   } else if (player.stamina < 100) {
@@ -155,7 +169,6 @@ function update(dt){
     player.hunger -= dt * 3.5;
   }
 
-  // 飢餓值歸零扣血機制：每秒扣 15 點 HP
   if (player.hunger <= 0) {
     player.hp -= dt * 15;
     if (Math.random() < dt * 2) {
@@ -176,7 +189,6 @@ function update(dt){
   player.hunger=clamp(player.hunger,0,100);
   player.hp=clamp(player.hp,0,100);
 
-  // 毒鼠邏輯 (扣除 HP)
   for(const p of poison){
     p.life-=dt; p.phase+=dt;
     const pdx=player.x-p.x, pdy=player.y-p.y, len=Math.hypot(pdx,pdy)||1;
@@ -188,7 +200,7 @@ function update(dt){
     p.vy+=(targetVy-p.vy)*Math.min(1,dt*turn);
     p.x+=p.vx*dt;p.y+=p.vy*dt;
     if(p.life>0 && Math.hypot(p.x-player.x,p.y-player.y)<19 && player.invuln<=0){
-      player.hp=Math.max(0,player.hp-20); // 毒鼠造成 20 點生命傷害
+      player.hp=Math.max(0,player.hp-20);
       player.invuln=.9;p.attackCd=.8;
       say('遭毒鼠攻擊！失去大量生命值！');
     }
@@ -198,7 +210,6 @@ function update(dt){
   for(const h of holes) h.life-=dt;
   holes=holes.filter(h=>h.life>0);
   
-  // 灰鼠撞擊邏輯 (扣除少量 HP)
   for(const m of mice){
     m.life-=dt;m.phase+=dt*3;m.attackCd-=dt;
     if(Math.random()<dt*1.8){m.vx=rand(-100,100);m.vy=rand(-90,90);}
@@ -207,7 +218,7 @@ function update(dt){
     m.x+=m.vx*dt;m.y+=m.vy*dt;
     m.x=clamp(m.x,25,WORLD_W-25);m.y=clamp(m.y,65,WORLD_H-25);
     if(d<22&&m.attackCd<=0&&player.invuln<=0){
-      player.hp=Math.max(0,player.hp-5); // 撞擊扣 5 點 HP
+      player.hp=Math.max(0,player.hp-5);
       player.invuln=.28;m.attackCd=1.2;
       const pushX=(player.x-m.x)/(d||1), pushY=(player.y-m.y)/(d||1);
       player.x=clamp(player.x+pushX*7,35,WORLD_W-35);
@@ -218,7 +229,6 @@ function update(dt){
   mice=mice.filter(m=>m.life>0);
   particles=particles.filter(p=>(p.life-=dt)>0);
 
-  // 死亡判定：改為生命值 HP 歸零
   if(player.hp<=0){
     mode='lose';
     gameOverTime = performance.now();
@@ -234,12 +244,33 @@ function update(dt){
 
 function attack(){
   if(mode!=='play')return;
+  
+  // 1. 即時讀取方向鍵，確保攻擊時如果按下方向鍵，就能馬上往該方向攻擊
+  let kx=0, ky=0;
+  if(keys.has('a')||keys.has('ArrowLeft')) kx--;
+  if(keys.has('d')||keys.has('ArrowRight')) kx++;
+  if(keys.has('w')||keys.has('ArrowUp')) ky--;
+  if(keys.has('s')||keys.has('ArrowDown')) ky++;
+  if(kx!==0 || ky!==0){
+    const len = Math.hypot(kx,ky);
+    player.dirX = kx/len; player.dirY = ky/len;
+    if(Math.abs(kx)>.05) player.facing = kx<0?-1:1;
+  }
+
   player.attack=.22;
-  const candidates=mice.map((m,i)=>({m,i,d:Math.hypot(m.x-player.x,m.y-player.y)})).filter(o=>o.d<48 && (o.m.x-player.x)*player.facing>-20).sort((a,b)=>a.d-b.d);
+  
+  // 修正攻擊邏輯：使用內積 (Dot Product) 讓攻擊判定跟隨 360 度真實面向 (上下左右皆可)
+  const candidates=mice.map((m,i)=>({m,i,d:Math.hypot(m.x-player.x,m.y-player.y)}))
+    .filter(o=>{
+      if (o.d >= 48) return false;
+      const dot = (o.m.x-player.x)*player.dirX + (o.m.y-player.y)*player.dirY;
+      return dot > -15; // 確保目標在面對的半圓範圍內
+    }).sort((a,b)=>a.d-b.d);
+
   if(candidates.length){
     const target=candidates[0].m;mice=mice.filter(m=>m!==target);
     player.hunger=clamp(player.hunger+25,0,100);
-    player.hp=clamp(player.hp+10,0,100); // 捕食同時恢復 10 點 HP
+    player.hp=clamp(player.hp+10,0,100);
     for(let i=0;i<8;i++)particles.push({x:target.x,y:target.y,vx:rand(-35,35),vy:rand(-35,35),life:.5});
     say('捕食成功！飢餓值與生命值恢復。');
   } else {
@@ -305,31 +336,56 @@ function drawFarmer(){
 }
 
 function drawOwl(){
-  const p=player;ctx.save();ctx.translate(Math.round(p.x),Math.round(p.y));ctx.scale(p.facing,1);const x=0,y=0;
+  const p = player;
   
+  // 閃爍的無敵狀態
+  if (mode !== 'lose' && p.invuln > 0 && Math.floor(elapsed * 18) % 2 === 0) return;
+  
+  ctx.save();
+  ctx.translate(Math.round(p.x), Math.round(p.y));
   if (mode === 'lose') ctx.globalAlpha = 0.4;
-  else if (p.invuln>0 && Math.floor(elapsed*18)%2===0) { ctx.restore(); return; }
   
-  rect(x-13,y+11,26,6,'#101b18');
-  rect(x-10,y-18,20,28,'#d8cba5');rect(x-16,y-12,7,20,'#8c7658');rect(x+9,y-12,7,20,'#8c7658');
-  rect(x-8,y-25,6,10,'#d8cba5');rect(x+3,y-25,6,10,'#d8cba5');
-  rect(x-8,y-13,7,7,'#f0e6c8');rect(x+2,y-13,7,7,'#f0e6c8');
-  rect(x-6,y-11,3,3,'#171c17');rect(x+4,y-11,3,3,'#171c17');
-  rect(x-2,y-6,4,4,'#c88c3f');
-  rect(x-5,y+1,10,5,'#bba87c');
-  if(Math.floor(p.step)%2===0&&keys.size){rect(x-9,y+8,5,5,'#d9c9a0');rect(x+5,y+8,5,5,'#d9c9a0');}
-  if(p.attack>0){
-    ctx.strokeStyle='#f5e8b5';ctx.lineWidth=3;ctx.beginPath();
-    ctx.arc(x+14,y,25,-.9,1.1);ctx.stroke();
+  // 畫陰影
+  rect(-13, 16, 26, 6, '#101b18');
+
+  // 1. 繪製草鴞本體 (獨立做左右翻轉)
+  ctx.save();
+  const scaleX = p.facing === 1 ? -1 : 1;
+  ctx.scale(scaleX, 1);
+  
+  let frameIndex = 0;
+  if (p.isMoving) {
+    frameIndex = Math.floor(p.step) % 8;
+  }
+  
+  const currentImg = owlImages[frameIndex];
+  if (currentImg && currentImg.complete && currentImg.naturalWidth > 0) {
+    ctx.drawImage(currentImg, -22, -30, 44, 48);
+  } else {
+    rect(-10, -18, 20, 28, '#d8cba5');
+  }
+  ctx.restore(); // 結束本體的翻轉，避免干擾攻擊線條
+
+  // 2. 攻擊動畫線條 (獨立做 360 度旋轉，完美對齊方向鍵)
+  if(p.attack > 0){
+    ctx.save();
+    ctx.rotate(Math.atan2(p.dirY, p.dirX)); // 轉向最新操作的 dirX, dirY
+    ctx.strokeStyle='#f5e8b5';
+    ctx.lineWidth=3;
+    ctx.beginPath();
+    ctx.arc(15, 0, 22, -1.2, 1.2); // 在正前方畫出揮擊弧線
+    ctx.stroke();
+    ctx.restore();
   }
   
   if (mode === 'lose') {
     ctx.globalAlpha = 1.0;
-    text('💀', x, y-30, 24, '#ffffff', 'center');
-    text('死亡', x, y-10, 12, '#ff6666', 'center');
+    text('💀', 0, -40, 24, '#ffffff', 'center');
+    text('死亡', 0, -20, 12, '#ff6666', 'center');
   } else {
-    text('草鴞',x,y+34,11,'#f2edcf','center');
+    text('草鴞', 0, 34, 11, '#f2edcf', 'center');
   }
+  
   ctx.restore();
 }
 
@@ -357,22 +413,18 @@ function draw(){
   // UI 介面：生命值(HP)、飢餓值(HUNGER)、體力值(STAMINA)
   rect(14,10,245,86,'#101c18');
   
-  // 生命值條 (紅色 HP)
   rect(20,18,130,8,'#4a2323');
   rect(20,18,130*(player?player.hp:100)/100,8,'#e74c3c');
   text('生命 '+(player?Math.ceil(player.hp):100)+'%', 158, 26, 12, '#ff9999');
 
-  // 飢餓值條 (黃綠色 HUNGER)
   rect(20,34,130,8,'#42513b');
   rect(20,34,130*(player?player.hunger:100)/100,8,'#c8dc78');
   text('飢餓 '+(player?Math.ceil(player.hunger):100)+'%', 158, 42, 12, '#edf3df');
   
-  // 體力條 (藍色 STAMINA)
   rect(20,50,130,8,'#293845');
   rect(20,50,130*(player?player.stamina:100)/100,8,'#6cb5d9');
   text('體力 '+(player?Math.ceil(player.stamina):100)+'%', 158, 58, 12, '#edf3df');
 
-  // 時間進度條
   rect(20,68,130,5,'#35423a');rect(20,68,130*Math.min(1,elapsed/duration),5,'#87b7c4');
   text('夜晚 '+Math.floor(Math.min(elapsed,duration))+' / '+duration+' 秒', 158, 75, 11, '#cbd7c0');
   
